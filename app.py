@@ -102,24 +102,62 @@ def load_index_data(secondary_ticker: str = "^OMX"):
 @st.cache_data(ttl=86400, show_spinner="Hämtar Konjunkturbarometer från KI...")
 def load_ki_barometer():
     """
-    Hämtar Barometerindikatorn via KI:s PXWeb-API med robust felhantering
-    och förfalskad User-Agent för att undvika blockering.
+    Hämtar Barometerindikatorn via KI:s NYA PXWeb-API (uppdaterad struktur).
+    Genomför först en mjuk avläsning (GET) för att hämta rätt variabelkoder dynamiskt.
     """
-    url = "https://statistik.konj.se/PXWeb/api/v1/sv/KonjBar/Barometerindikatorn/BARTOTNMN.px"
+    # KI har flyttat sin databas. Sökvägen BARTOTNMN.px är ersatt med Indikatorm.px
+    url = "https://statistik.konj.se/PxWeb/api/v1/sv/KonjBar/indikatorer/Indikatorm.px"
     
-    # Lägg till en standard User-Agent för att undvika 403 Forbidden från API-brandväggen
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    # Vi skapar en backup-fråga utifall den specifika koden 'BARTOT' ändrats i framtiden
+    # Standardgissningar om den dynamiska avläsningen mot förmodan skulle misslyckas
+    variable_code = "Indikator"
+    target_value_code = "BARTOT"
+
+    # Steg 1: Dynamisk sökning efter rätt koder (eftersom KI möblerat om)
+    try:
+        meta_resp = requests.get(url, headers=headers, timeout=10)
+        if meta_resp.status_code == 200:
+            meta_data = meta_resp.json()
+            for var in meta_data.get("variables", []):
+                if var.get("code", "").lower() in ("indikator", "contentscode"):
+                    variable_code = var.get("code", "Indikator")
+                    values = var.get("values", [])
+                    value_texts = var.get("valueTexts", [])
+                    for val, txt in zip(values, value_texts):
+                        # Vi letar efter det totala indexet (Barometerindikatorn)
+                        if "barometerindikator" in txt.lower():
+                            target_value_code = val
+                            break
+    except Exception:
+        pass
+
+    # Steg 2: Skapa två olika frågor (en specifik och en komplett fallback)
     queries = [
         {
-            "query": [{"code": "ContentsCode", "selection": {"filter": "item", "values": ["BARTOT"]}}],
+            "query": [
+                {
+                    "code": variable_code,
+                    "selection": {
+                        "filter": "item",
+                        "values": [target_value_code]
+                    }
+                }
+            ],
             "response": {"format": "json"}
         },
         {
-            "query": [{"code": "ContentsCode", "selection": {"filter": "all", "values": ["*"]}}],
+            "query": [
+                {
+                    "code": variable_code,
+                    "selection": {
+                        "filter": "all",
+                        "values": ["*"]
+                    }
+                }
+            ],
             "response": {"format": "json"}
         }
     ]
@@ -137,14 +175,19 @@ def load_ki_barometer():
             if not data_rows:
                 continue
 
-            # Identifiera tidskolumnen dynamiskt
+            # Hitta kolumnindex för Tid och Indikator dynamiskt
             time_col_idx = None
+            var_col_idx = 0
+            
             for idx, col in enumerate(columns):
-                if col.get("code", "").lower() in ("tid", "month", "manad", "månad", "time"):
+                col_code_lower = col.get("code", "").lower()
+                if col_code_lower in ("tid", "month", "manad", "månad", "time"):
                     time_col_idx = idx
-                    break
+                if col_code_lower == variable_code.lower():
+                    var_col_idx = idx
+            
             if time_col_idx is None:
-                time_col_idx = 0
+                time_col_idx = 1 if var_col_idx == 0 else 0
 
             records = []
             for row in data_rows:
@@ -153,8 +196,12 @@ def load_ki_barometer():
                 if not key or not values:
                     continue
 
+                # Om vi tvingades köra fallback (hämta alla), filtrerar vi ut rätt indikator här
+                if query["query"][0]["selection"]["filter"] == "all":
+                    if key[var_col_idx] != target_value_code:
+                        continue
+
                 period_str = key[time_col_idx]
-                # Säkerställ ren tidsträng oavsett om formatet är 2024M01, 2024-01 eller 202401
                 clean_str = period_str.replace("M", "").replace("-", "").strip()
                 
                 try:
@@ -165,7 +212,6 @@ def load_ki_barometer():
                     continue
 
                 try:
-                    # Byt ut eventuella europeiska kommatecken mot punkter innan konvertering till float
                     val_str = values[0].replace(",", ".")
                     value = float(val_str)
                 except (ValueError, IndexError, TypeError):
