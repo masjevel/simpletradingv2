@@ -684,5 +684,3 @@ with tab2:
             f"Jämförelseindex: {secondary_ticker} (OMXS30) · "
             f"Uppdaterad: {datetime.date.today().strftime('%Y-%m-%d')} · Cache: KI 24h / marknadsdata 1h"
         )
-
-```
