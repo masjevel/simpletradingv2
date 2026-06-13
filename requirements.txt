@@ -4,4 +4,3 @@ yfinance>=0.2.40
 pandas-ta>=0.3.14b
 plotly>=5.20.0
 numpy>=1.26.0
-requests>=2.31.0
